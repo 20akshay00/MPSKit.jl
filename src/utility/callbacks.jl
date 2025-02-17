@@ -13,11 +13,11 @@ function (c::Callback)(iter, state, H, envs)
     return state, envs
 end
 
-struct CallbackList <: Callback
+struct CallbackSet
     callbacks::Vector{Callback}
 end
 
-function (c::CallbackList)(iter, state, H, envs)
+function (c::CallbackSet)(iter, state, H, envs)
     for callback in c.callbacks
         state, envs = callback(iter, state, H, envs)
     end
@@ -25,23 +25,28 @@ function (c::CallbackList)(iter, state, H, envs)
     return state, envs
 end
 
-Base.getindex(c::CallbackList, idx) = getindex(c.callbacks, idx)
-Base.length(c::CallbackList) = length(c.callbacks)
+Base.getindex(c::CallbackSet, idx) = getindex(c.callbacks, idx)
+Base.length(c::CallbackSet) = length(c.callbacks)
 
 ############################################
-# Record OBSERVABLES DURING OPTIMIZATION (EFFECT)
+# PREDEFINED AFFECTS
 ############################################
+
 struct RecordObservable{T1,T2}
     "collection of string-array pairs containing observable data"
     data::T1
     "functions to compute observable data"
     observables::T2
 
-    "expects iterable of key-value pairs (observable_name, function_to_compute_observable)"
-    function RecordObservable(recipe)
+    "expects iterable of key-value pairs (observable_name, function_to_compute_observable) and a tuple of types"
+    function RecordObservable(recipe, types)
         names = keys(recipe)
         observables = values(recipe)
-        data = NamedTuple{names}(([] for _ in eachindex(names)))
+
+        @assert length(names) == length(types) "Number of types must match the number of observables"
+
+        @warn "Observable type is unspecified. Data will be stored as Any[]."
+        data = NamedTuple{names}((types[i][] for i in eachindex(names)))
         return new{typeof(data),typeof(observables)}(data, observables)
     end
 
@@ -66,9 +71,17 @@ function (p::RecordObservable)(iter, state, H, envs)
     return state, envs
 end
 
-############################################
-# WAVE-FUNCTION BACKUP DURING OPTIMIZATION (EFFECT)
-############################################
+function RecordEnergyConvergence()
+    return RecordObservable((energies=(iter, state, H, envs) -> real(expectation_value(state,
+                                                                                       H,
+                                                                                       envs)),
+                             times=(iter, state, H, envs) -> Base.time()
+                             #  errors=(iter, state, H, envs) -> maximum(pos -> calc_galerkin(state,
+                             #                                                                pos,
+                             #                                                                envs),
+                             #                                           1:length(state))))
+                             ), (Float64, Float64))
+end
 
 struct SaveState
     "system parameters and state"
@@ -80,10 +93,10 @@ struct SaveState
     "path to save checkpoint files"
     savepath::String
 
-    function SaveState(params::Dict, observables::Union{Nothing,RecordObservable}, path,
-                       save_every_tick=true)
-        isnothing(observables) && (observables = RecordObservable(()))
-        obj = new(merge(params, Dict("state" => Nothing, "envs" => Nothing)), observables,
+    function SaveState(; parameters=Dict(), path="./save_state.jld2", save_every_tick=true,
+                       observables=RecordObservable(()))
+        obj = new(merge(parameters, Dict("state" => Nothing, "envs" => Nothing)),
+                  observables,
                   nothing, save_every_tick, path)
 
         # save when program is interrupted
@@ -109,27 +122,14 @@ end
 function save(p::SaveState)
     if isnothing(p.data["state"])
         @warn "Program terminated before a checkpoint was reached. State was not saved!"
+    else
+        # requires JLD2
         save(p.savepath, "data", p.data)
     end
 end
 
 ############################################
-# COMMON CALLBACK EFFECTS
-############################################
-
-function RecordEnergyConvergence()
-    return RecordObservable((energies=(iter, state, H, envs) -> real(expectation_value(state,
-                                                                                       H,
-                                                                                       envs)),
-                             times=(iter, state, H, envs) -> Base.time(),
-                             errors=(iter, state, H, envs) -> maximum(pos -> calc_galerkin(state,
-                                                                                           pos,
-                                                                                           envs),
-                                                                      1:length(state))))
-end
-
-############################################
-# COMMON CALLBACK CONDITIONS
+# PREDEFINED CALLBACK CONDITIONS
 ############################################
 abstract type CallbackCondition end
 
